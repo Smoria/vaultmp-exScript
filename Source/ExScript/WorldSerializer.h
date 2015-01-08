@@ -6,14 +6,69 @@ using namespace vaultmp;
 
 #include <fstream>
 #include "logging.h"
-#include "func.h"
 
 class WorldSerializer
 {
-
 private:
+
+	struct ItemSaveStruct
+	{
+		Base base = Base(0);
+		CELL cell = CELL(0);
+		NPC_ owner = NPC_(0);
+		UCount count = 0;
+		Value condition = 0;
+		Value X = 0;
+		Value Y = 0;
+		Value Z = 0;
+		Value aX = 0;
+		Value aY = 0;
+		Value aZ = 0;
+	};
+	struct ContainerItemSaveStruct
+	{
+		Base base = Base(0);
+		NPC_ owner = NPC_(0);
+		UCount count = 0;
+		Value condition = 0;
+		State silent = True;
+	};
+	struct PlayerItemSaveStruct :ContainerItemSaveStruct
+	{
+		State equip = False;
+		State stick = False;
+	};
+	struct ContainerSaveStruct
+	{
+		Base base = Base(0);
+		CELL cell = CELL(0);
+		NPC_ owner = NPC_(0);
+		UCount count = 0;
+		Lock lock = Lock::Unlocked;
+		Value X = 0;
+		Value Y = 0;
+		Value Z = 0;
+		Value aX = 0;
+		Value aY = 0;
+		Value aZ = 0;
+	};
+	struct PlayerSaveStruct
+	{
+		CELL cell = CELL(0);
+		RACE race = RACE::Caucasian;
+		Sex sex = Sex::Male;
+		Value X = 0;
+		Value Y = 0;
+		Value Z = 0;
+		Value aX = 0;
+		Value aY = 0;
+		Value aZ = 0;
+	};
+
+
 	ID lastStdContainer;
 	bool placeDefaultItems;
+	int serializationType;
 
 	void init();
 
@@ -25,11 +80,16 @@ public:
 	const char* PlayerStatePath = "./saves/players/";	
 	
 	WorldSerializer() noexcept;
-	WorldSerializer(bool placeDefaultItems) noexcept;
+	WorldSerializer(bool placeDefaultItems, int serializationType) noexcept;
+
 	bool IsPlacingDefaultItems() noexcept;
+	int GetSerializationType() noexcept;
+
 	Result SaveWorldState() noexcept;
 	Result LoadWorldState() noexcept;
-
+	Result SavePlayerData(Player player) noexcept;
+	Result LoadPlayerData(Player player, bool loadItems) noexcept;
+	Result SaveAllPlayersData() noexcept;
 };
 
 void WorldSerializer::init()
@@ -49,14 +109,15 @@ void WorldSerializer::init()
 
 WorldSerializer::WorldSerializer() noexcept
 {
-	placeDefaultItems = true;
+	placeDefaultItems = false;
+	serializationType = 0;
 	init();
-	//useItemLists = strcmp(ini.GetValue("settings", "useitemlists", "false"), "true") == 0;	
 }
 
-WorldSerializer::WorldSerializer(bool placeDefaultItems) noexcept
+WorldSerializer::WorldSerializer(bool placeDefaultItems, int serializationType) noexcept
 {
 	this->placeDefaultItems = placeDefaultItems;
+	this->serializationType = serializationType;
 	init();
 }
 
@@ -65,240 +126,416 @@ bool WorldSerializer::IsPlacingDefaultItems() noexcept
 	return placeDefaultItems;
 }
 
+int WorldSerializer::GetSerializationType() noexcept
+{
+	return serializationType;
+}
+
 Result WorldSerializer::SaveWorldState() noexcept
 {
-	unsigned int cntr = 0, cntr2 = 0;
-	FILE * pFile;
-	char foutput[128];
-	pFile = fopen(ItemsStatePath, "w");
-	if (pFile)
+	unsigned int savedContainerCount = 0, savedContainerItemsCount = 0, savedItemsCount = 0;
+	std::fstream outFile;
+
+	//Save items
+	outFile.open(ItemsStatePath, std::fstream::out | std::fstream::binary);
+	if (outFile.fail())
+	{
+		MainLog.e("WORLD: Can't save items");
+	}
+	else
 	{
 		IDVector items = Item::GetList();
 		for (const auto& id : items)
 		{
-			if (GetItemContainer(id) == 0)
+			if (GetItemContainer(id) == 0) //Save only items without any container(npc, player, etc.)
 			{
 				Item item(id);
-				UCount count = item.GetItemCount();
-				Value condition = item.GetItemCondition();
-				Value X, Y, Z, rX, rY, rZ;
-				item.GetPos(X, Y, Z);
-				item.GetAngle(rX, rY, rZ);
-				snprintf(foutput, 128, "%u %u %f %i %f %f %f %f %f %f %u\r\n", item.GetBase(), count, condition, item.GetCell(), X, Y, Z, rX, rY, rZ, item.GetOwner());
-				fputs(foutput, pFile);
-				cntr++;
+				ItemSaveStruct itemSave;
+				itemSave.base = item.GetBase();
+				itemSave.cell = item.GetCell();
+				itemSave.owner = item.GetOwner();
+				itemSave.count = item.GetItemCount();
+				itemSave.condition = item.GetItemCondition();
+				item.GetPos(itemSave.X, itemSave.Y, itemSave.Z);
+				item.GetAngle(itemSave.aX, itemSave.aY, itemSave.aZ);
+
+				outFile.write(reinterpret_cast<char*>(&itemSave), sizeof(itemSave));
+				savedItemsCount++;
 			}
 		}
-		fclose(pFile);
-		MainLog << LOG_INFO << "WORLD: " << cntr << " items saved" << std::endl;
+
+		outFile.close();
+		(MainLog << LOG_INFO << "WORLD: " << savedItemsCount << " items saved").end();
+	}
+
+	//Save standart containers
+	outFile.open(ContainersStatePath, std::fstream::out | std::fstream::binary);
+	if (outFile.fail())
+	{
+		MainLog.e("WORLD: Can't save containers");
 	}
 	else
 	{
-		MainLog.e("WORLD: Can't save items");
-	}
-
-	pFile = fopen(ContainersStatePath, "w");
-	if (pFile)
-	{
-		cntr = 0;
 		IDVector containers = Container::GetList();
 		for (const auto& id : containers)
 		{
 			if (!IsActor(id) && id <= lastStdContainer)
 			{
-				unsigned int itemCount = GetContainerItemCount(id);
-				if (itemCount > 0)
+				unsigned int containerItemCount = GetContainerItemCount(id);
+				if (containerItemCount > 0)	//Save standart containers only with items
 				{
-					Value X, Y, Z;
 					Container container(id);
-					container.GetPos(X, Y, Z);
-					snprintf(foutput, 128, "%u %i %f %f %f %u %u %u\r\n", container.GetBase(), container.GetCell(), X, Y, Z, itemCount, container.GetLock(), container.GetOwner());
-					fputs(foutput, pFile);
+					ContainerSaveStruct containerSave;
+
+					containerSave.base = container.GetBase();
+					containerSave.cell = container.GetCell();
+					containerSave.owner = container.GetOwner();
+					containerSave.count = containerItemCount;
+					containerSave.lock = container.GetLock();
+					container.GetPos(containerSave.X, containerSave.Y, containerSave.Z);
+					container.GetAngle(containerSave.aX, containerSave.aY, containerSave.aZ);
+
+					outFile.write(reinterpret_cast<char*>(&containerSave), sizeof(containerSave));
+
+					//Save cntainer items
 					IDVector items = container.GetContainerItemList();
 					for (const auto& itemid : items)
 					{
 						Item item(itemid);
-						snprintf(foutput, 128, "%u %u %f %u\r\n", item.GetBase(), item.GetItemCount(), item.GetItemCondition(), item.GetItemSilent());
-						fputs(foutput, pFile);
-						cntr2++;
+						ContainerItemSaveStruct itemSave;
+
+						itemSave.base = item.GetBase();
+						itemSave.owner = item.GetOwner();
+						itemSave.count = item.GetItemCount();
+						itemSave.condition = item.GetItemCondition();
+
+						outFile.write(reinterpret_cast<char*>(&itemSave), sizeof(itemSave));
+
+						savedContainerItemsCount++;
 					}
-					fputs("\r\n", pFile); // Separator
-					cntr++;
+
+					//Separate container from others by empty item
+					ContainerItemSaveStruct itemSaveSep;
+					outFile.write(reinterpret_cast<char*>(&itemSaveSep), sizeof(itemSaveSep));
+
+					savedContainerCount++;
 				}
 			}
 		}
-		fclose(pFile);
-		MainLog << LOG_INFO << "WORLD: " << cntr2 << " items saved in " << cntr << " containers" << std::endl;
+
+		outFile.close();
+		(MainLog << LOG_INFO << "WORLD: " << savedContainerCount << " containers saved with " << savedContainerItemsCount << " items").end();
+	}
+
+	//Save custom placed containers
+	outFile.open(CustomContainersStatePath, std::fstream::out | std::fstream::binary);
+	if (outFile.fail())
+	{
+		MainLog.e("WORLD: Can't save custom containers");
 	}
 	else
 	{
-		MainLog.e("WORLD: Can't save containers");
-	}
-
-	pFile = fopen(CustomContainersStatePath, "w");
-	if (pFile)
-	{
-		cntr = 0;
-		cntr2 = 0;
+		savedContainerCount = 0;
+		savedContainerItemsCount = 0;
 		IDVector containers = Container::GetList();
 		for (const auto& id : containers)
 		{
 			if (!IsActor(id) && id > lastStdContainer)
 			{
+				unsigned int containerItemCount = GetContainerItemCount(id);
+
 				Container container(id);
-				unsigned int itemCount = GetContainerItemCount(id);
-				Value X, Y, Z, rX, rY, rZ;
-				container.GetPos(X, Y, Z);
-				container.GetAngle(rX, rY, rZ);
-				snprintf(foutput, 128, "%u %i %f %f %f %f %f %f %u %u %u\r\n", container.GetBase(), container.GetCell(), X, Y, Z, rX, rY, rZ, itemCount, container.GetLock(), container.GetOwner());
-				fputs(foutput, pFile);
-				if (itemCount > 0)
+				ContainerSaveStruct containerSave;
+				containerSave.base = container.GetBase();
+				containerSave.cell = container.GetCell();
+				containerSave.owner = container.GetOwner();
+				containerSave.count = containerItemCount;
+				containerSave.lock = container.GetLock();
+				container.GetPos(containerSave.X, containerSave.Y, containerSave.Z);
+				container.GetAngle(containerSave.aX, containerSave.aY, containerSave.aZ);
+				outFile.write(reinterpret_cast<char*>(&containerSave), sizeof(containerSave));
+
+				IDVector items = container.GetContainerItemList();
+				for (const auto& itemid : items)
 				{
-					IDVector items = container.GetContainerItemList();
-					for (const auto& itemid : items)
-					{
-						Item item(itemid);
-						snprintf(foutput, 128, "%u %u %f %u\r\n", item.GetBase(), item.GetItemCount(), item.GetItemCondition(), item.GetItemSilent());
-						fputs(foutput, pFile);
-						cntr2++;
-					}
-					fputs("\r\n", pFile); // Separator
+					Item item(itemid);
+					ContainerItemSaveStruct itemSave;
+
+					itemSave.base = item.GetBase();
+					itemSave.owner = item.GetOwner();
+					itemSave.count = item.GetItemCount();
+					itemSave.condition = item.GetItemCondition();
+
+					outFile.write(reinterpret_cast<char*>(&itemSave), sizeof(itemSave));
+
+					savedContainerItemsCount++;
 				}
-				cntr++;
+
+				//Separate container from others by empty item
+				ContainerItemSaveStruct itemSaveSep;
+				outFile.write(reinterpret_cast<char*>(&itemSaveSep), sizeof(itemSaveSep));
+
+				savedContainerCount++;
 			}
 		}
-		fclose(pFile);
-		MainLog << LOG_INFO << "WORLD: " << cntr2 << " items saved in " << cntr << " custom containers" << std::endl;
+
+		outFile.close();
+		(MainLog << LOG_INFO << "WORLD: " << savedContainerCount << " custom containers saved with " << savedContainerItemsCount << " items").end();
 	}
-	else
-	{
-		MainLog.e("WORLD: Can't save custom containers");
-	}
+
 	return Result(1);
 }
 
 Result WorldSerializer::LoadWorldState() noexcept
 {
-	unsigned int cntr = 0, cntr2 = 0;
-	char buf[128];
-	if (FileExists(ItemsStatePath))
+	unsigned int loadedContainerCount = 0, loadedContainerItemsCount = 0, loadedItemsCount = 0;
+
+	//Load items
+	std::ifstream inFile(ItemsStatePath);
+	if (inFile.good())
 	{
-		std::ifstream fin(ItemsStatePath);
-		fin.getline(buf, 128);
-		while (fin.good() && strlen(buf) > 2)
+		while (inFile.good())
 		{
-			unsigned int base, count, cell, owner;
-			Value condition, X, Y, Z, rX, rY, rZ;
-			sscanf(buf, "%u %u %lf %i %lf %lf %lf %lf %lf %lf %u", &base, &count, &condition, &cell, &X, &Y, &Z, &rX, &rY, &rZ, &owner);
-			Item item = CreateItem(static_cast<Base>(base), static_cast<CELL>(cell), X, Y, Z);
-			item.SetAngle(rX, rY, rZ);
-			item.SetOwner(static_cast<NPC_>(owner));
-			item.SetItemCount(count);
-			item.SetItemCondition(condition);
-			fin.getline(buf, 128);
-			cntr++;
+			ItemSaveStruct itemSave;
+			inFile.read(reinterpret_cast<char*>(&itemSave), sizeof(itemSave));
+			if (itemSave.base != 0)
+			{
+				Item item = Item::Create(itemSave.base, itemSave.cell, itemSave.X, itemSave.Y, itemSave.Z);
+				item.SetAngle(itemSave.aX, itemSave.aY, itemSave.aZ);
+				item.SetOwner(itemSave.owner);
+				item.SetItemCount(itemSave.count);
+				item.SetItemCondition(itemSave.condition);
+
+				loadedItemsCount++;
+			}
 		}
-		fin.close();
-		MainLog << LOG_INFO << "WORLD: " << cntr << " items loaded" << std::endl;
+
+		inFile.close();
+		(MainLog << LOG_INFO << "WORLD: " << loadedItemsCount << " items loaded").end();
 	}
 	else
 	{
 		MainLog.e("WORLD: Can't load items");
 	}
-
-	if (FileExists(ContainersStatePath))
+	
+	//Load standart containers
+	inFile.open(ContainersStatePath);
+	if (inFile.good())
 	{
-		cntr = 0;
-		std::ifstream fin(ContainersStatePath);
-		fin.getline(buf, 128);
-		while (fin.good() && strlen(buf) > 2)
+		double stdContainerPositionCheckError = 1;
+		while (inFile.good())
 		{
-			Value X, Y, Z;
-			unsigned int cell, base, itemCount, owner, lock;
-			sscanf(buf, "%u %i %lf %lf %lf %u %u %u", &base, &cell, &X, &Y, &Z, &itemCount, &lock, &owner);
-			IDVector containers = Container::GetList();
-			for (const auto& id : containers)
+			ContainerSaveStruct containerSave;
+			inFile.read(reinterpret_cast<char*>(&containerSave), sizeof(containerSave));
+
+			if (containerSave.base != 0)
 			{
-				if (!IsActor(id) && base == GetBase(id) && static_cast<CELL>(cell) == GetCell(id))
+				//For each standart container in world
+				IDVector containers = Container::GetList();
+				for (const auto& id : containers)
 				{
-					Value cX, cY, cZ;
-					GetPos(id, cX, cY, cZ);
-					if (abs(X - cX) < 1 && abs(Y - cY) < 1 && abs(Z - cZ) < 1)
+					//If container has same base and cell
+					if (!IsActor(id) && containerSave.base == GetBase(id) && containerSave.cell == GetCell(id))
 					{
-						Container container(id);
-						container.SetLock(id, static_cast<Lock>(lock));
-						container.SetOwner(static_cast<NPC_>(owner));
-						cntr++;
-						if (itemCount > 0)
+						Value cX, cY, cZ;
+						GetPos(id, cX, cY, cZ);
+						//If container has same position
+						if (abs(containerSave.X - cX) < stdContainerPositionCheckError && abs(containerSave.Y - cY) < stdContainerPositionCheckError && abs(containerSave.Z - cZ) < stdContainerPositionCheckError)
 						{
-							fin.getline(buf, 128);
-							while (fin.good() && strlen(buf) > 2)
+							Container container(id);
+							container.SetLock(id, containerSave.lock);
+							container.SetOwner(containerSave.owner);
+							while (inFile.good())
 							{
-								UCount count;
-								Value condition;
-								unsigned int silent;
-								sscanf(buf, "%u %u %lf %u", &base, &count, &condition, &silent);
-								container.AddItem(static_cast<Base>(base), count, condition, static_cast<State>(silent));
-								cntr2++;
-								fin.getline(buf, 128);
+								ContainerItemSaveStruct itemSave;
+								inFile.read(reinterpret_cast<char*>(&itemSave), sizeof(itemSave));
+								if (itemSave.base != 0)
+								{
+									container.AddItem(itemSave.base, itemSave.count, itemSave.condition, itemSave.silent);
+									loadedContainerItemsCount++;
+								}
+								else
+								{
+									break;	//We reached separator item
+								}
 							}
+
+							loadedContainerCount++;
+							break;	// We found our container, stop searching
 						}
-						fin.getline(buf, 128);
-						break;
 					}
 				}
 			}
-			fin.getline(buf, 128);
 		}
-		fin.close();
-		MainLog << LOG_INFO << "WORLD: " << cntr2 << " items loaded and placed in " << cntr << " containers" << std::endl;
+
+		inFile.close();
+		(MainLog << LOG_INFO << "WORLD: " << loadedContainerCount << " containers loaded with " << loadedContainerItemsCount << " items").end();
 	}
 	else
 	{
 		MainLog.e("WORLD: Can't load containers");
 	}
 
-	if (FileExists(CustomContainersStatePath))
+	//Load custom placed containers
+	inFile.open(CustomContainersStatePath);
+	if (inFile.good())
 	{
-		cntr = 0;
-		cntr2 = 0;
-		std::ifstream fin(CustomContainersStatePath);
-		fin.getline(buf, 128);
-		while (fin.good() && strlen(buf) > 2)
+		loadedContainerCount = 0;
+		loadedContainerItemsCount = 0;
+
+		while (inFile.good())
 		{
-			Value X, Y, Z, rX, rY, rZ;
-			unsigned int cell, base, itemCount, owner, lock;
-			sscanf(buf, "%u %i %lf %lf %lf %lf %lf %lf %u %u %u", &base, &cell, &X, &Y, &Z, &rX, &rY, &rZ, &itemCount, &lock, &owner);
-			ID id = CreateContainer(static_cast<CONT>(base), static_cast<CELL>(cell), X, Y, Z);
-			Container container(id);
-			container.SetAngle(rX, rY, rZ);
-			container.SetLock(id, static_cast<Lock>(lock));
-			container.SetOwner(static_cast<NPC_>(owner));
-			cntr++;
-			if (itemCount > 0)
+			ContainerSaveStruct containerSave;
+			inFile.read(reinterpret_cast<char*>(&containerSave), sizeof(containerSave));
+
+			if (containerSave.base != 0)
 			{
-				fin.getline(buf, 128);
-				while (fin.good() && strlen(buf) > 2)
+				Container container = CreateContainer(static_cast<CONT>(containerSave.base), containerSave.cell, containerSave.X, containerSave.Y, containerSave.Z);
+
+				container.SetAngle(containerSave.aX, containerSave.aY, containerSave.aZ);
+				container.SetLock(ID(0), containerSave.lock);
+				container.SetOwner(containerSave.owner);
+				while (inFile.good())
 				{
-					UCount count;
-					Value condition;
-					unsigned int silent;
-					sscanf(buf, "%u %u %lf %u", &base, &count, &condition, &silent);
-					container.AddItem(static_cast<Base>(base), count, condition, static_cast<State>(silent));
-					cntr2++;
-					fin.getline(buf, 128);
+					ContainerItemSaveStruct itemSave;
+					inFile.read(reinterpret_cast<char*>(&itemSave), sizeof(itemSave));
+					if (itemSave.base != 0)
+					{
+						container.AddItem(itemSave.base, itemSave.count, itemSave.condition, itemSave.silent);
+						loadedContainerItemsCount++;
+					}
+					else
+					{
+						break;	//We reached separator item
+					}
 				}
+
+				loadedContainerCount++;
 			}
-			fin.getline(buf, 128);
 		}
-		fin.close();
-		MainLog << LOG_INFO<< "WORLD: " << cntr2 << " items saved and placed in " << cntr << " custom containers" << std::endl;
+
+		inFile.close();
+		(MainLog << LOG_INFO << "WORLD: " << loadedContainerCount << " custom containers loaded with " << loadedContainerItemsCount << " items").end();
 	}
 	else
 	{
-		MainLog.e("WORLD: Can't load items");
+		MainLog.e("WORLD: Can't load custom containers");
 	}
+
 	return Result(1);
+}
+
+Result WorldSerializer::SavePlayerData(Player player) noexcept
+{
+	String filename(PlayerStatePath);
+	String playerName = player.GetBaseName();
+	filename += playerName + ".dat";
+
+	std::fstream outFile(filename, std::fstream::out | std::fstream::binary);
+
+	if (outFile.fail())
+	{
+		(MainLog << LOG_ERROR << "WORLD: Can't save player data for " << playerName).end();
+		return Result(0);
+	}
+	else
+	{
+		PlayerSaveStruct playerSave;
+
+		playerSave.cell = player.GetCell();
+		playerSave.race = player.GetActorBaseRace();
+		playerSave.sex = player.GetActorBaseSex();
+		player.GetPos(playerSave.X, playerSave.Y, playerSave.Z);
+		player.GetAngle(playerSave.aX, playerSave.aY, playerSave.aZ);
+
+		outFile.write(reinterpret_cast<char*>(&playerSave), sizeof(playerSave));
+
+		IDVector items = player.GetContainerItemList();
+		for (const auto& itemid : items)
+		{
+			Item item(itemid);
+			Base itemBase = item.GetBase();
+			static const Base PipBoy = static_cast<Base>(ARMO::PipBoy);
+			static const Base PipBoyGlove = static_cast<Base>(ARMO::PipBoyGlove);
+			if (itemBase != PipBoy && itemBase != PipBoyGlove)
+			{
+				PlayerItemSaveStruct itemSave;
+
+				itemSave.base = itemBase;
+				itemSave.owner = item.GetOwner();
+				itemSave.count = item.GetItemCount();
+				itemSave.condition = item.GetItemCondition();
+				itemSave.equip = item.GetItemEquipped();
+				itemSave.silent = item.GetItemSilent();
+				itemSave.stick = item.GetItemStick();
+
+				outFile.write(reinterpret_cast<char*>(&itemSave), sizeof(itemSave));
+			}
+		}
+		outFile.close();
+	}
+
+	return Result(1);
+}
+
+Result WorldSerializer::LoadPlayerData(Player player, bool loadItems) noexcept
+{
+	String filename(PlayerStatePath);
+	String playerName = player.GetBaseName();
+	filename += playerName + ".dat";
+
+	std::ifstream inFile(filename);
+	if (inFile.good())
+	{
+		while (inFile.good())
+		{
+			PlayerSaveStruct playerSave;
+			inFile.read(reinterpret_cast<char*>(&playerSave), sizeof(playerSave));
+
+			player.SetCell(playerSave.cell, playerSave.X, playerSave.Y, playerSave.Z);
+			player.SetActorBaseRace(playerSave.race);
+			player.SetActorBaseSex(playerSave.sex);
+			player.SetAngle(playerSave.aX, playerSave.aY, playerSave.aZ);
+
+			while (loadItems && inFile.good())
+			{
+				PlayerItemSaveStruct itemSave;
+				inFile.read(reinterpret_cast<char*>(&itemSave), sizeof(itemSave));
+				if (itemSave.base != 0)
+				{
+					if (itemSave.equip == True)
+					{
+						player.EquipItem(itemSave.base, itemSave.silent, itemSave.stick);
+					}
+					else
+					{
+						player.AddItem(itemSave.base, itemSave.count, itemSave.condition, itemSave.silent);
+					}
+				}
+			}
+		}
+		inFile.close();
+		return Result(1);
+	}
+	else
+	{
+		player.SetActorBaseRace(RACE::Caucasian);
+		player.SetActorBaseSex(Sex::Male);
+		return Result(0);
+	}
+}
+
+Result WorldSerializer::SaveAllPlayersData() noexcept
+{
+	IDVector players = GetList(Type::ID_PLAYER);
+	int n = 0;
+	for (const auto& id : players)
+		if (SavePlayerData(id) == 1)
+			n++;
+
+	(MainLog << LOG_INFO << "WORLD: Players data has been saved into " << n << " files").end();
+
+	return Result(n);
 }
 
 #endif
