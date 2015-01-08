@@ -33,10 +33,10 @@
     <ClInclude Include="exRecords.h">
       <Filter>Заголовочные файлы</Filter>
     </ClInclude>
-    <ClInclude Include="func.h">
+    <ClInclude Include="logging.h">
       <Filter>Заголовочные файлы</Filter>
     </ClInclude>
-    <ClInclude Include="logging.h">
+    <ClInclude Include="WeatherManager.h">
       <Filter>Заголовочные файлы</Filter>
     </ClInclude>
   </ItemGroup>

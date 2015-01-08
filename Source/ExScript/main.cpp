@@ -1,5 +1,9 @@
 #include "vaultscript.h"
 
+#if defined(WIN32) && !defined(__WIN32__)
+#define __WIN32__
+#endif
+
 #ifdef __WIN32__
 #define EXs "W"
 #include "io.h"
@@ -12,548 +16,524 @@
 #define EXver "0.2.0" EXs
 
 #include <iostream>
-#include <fstream>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include "SimpleIni.h"
 
 using namespace vaultmp;
+using namespace std;
 
 #include "exRecords.h"
 #include "logging.h"
-#include "func.h"
-#include "worldSerializer.h"
+#include "WorldSerializer.h"
+#include "WeatherManager.h"
 
-std::string serverPass, motd, CHCplayercname, CHCplayercmsg, CHCservermsg;
-bool showPOSRule;
-unsigned int serializeWorld;
+string ServerPassword;
+string ServerName;
+string ServerMapName;
+string ServerSite;
+string ServerMOTD;
+float ServerTimeScale;
+State ServerConsoleEnabled;
+bool ShowPlayersOnlineInRules;
+
 WorldSerializer* worldSerializer;
+WeatherManager* weatherManager;
 
-bool SavePlayerData(ID player) noexcept
-{
-	String name = GetBaseName(player);
-	char filename[64];
-	snprintf(filename, 64, "./files/Players/%s.dat", name.c_str());
-	FILE * pFile;
-	pFile = fopen(filename, "w");
-	if (pFile)
-	{
-		Value X, Y, Z, rX, rY, rZ;
-		GetPos(player, X, Y, Z);
-		GetAngle(player, rX, rY, rZ);
-		char foutput[128];
-		snprintf(foutput, 128, "%d %f %f %f %i %i %f %f %f\r\n", GetCell(player), X, Y, Z, GetActorBaseRace(player), GetActorBaseSex(player), rX, rY, rZ);
-		fputs(foutput, pFile);
-		IDVector items = Item::GetList();
-		for (const auto& id : items)
-		{
-			Item item(id);
-			Base base = item.GetBase();
-			static const Base PipBoy = static_cast<Base>(0x00015038);
-			static const Base PipBoyGloves = static_cast<Base>(0x00025B83);
-			if (base != PipBoy && base != PipBoyGloves && item.GetItemContainer() == player)
-			{
-				snprintf(foutput, 128, "%u %u %f %u %u\r\n", base, item.GetItemCount(), item.GetItemCondition(), item.GetItemEquipped() ? 1 : 0, item.GetItemSilent());
-				fputs(foutput, pFile);
-			}
-		}
-		fclose(pFile);
-		return true;
-	}
-	else
-	{
-		printf("PLAYER_sys: Can't save %s player data\n", name.c_str());
-		return false;
-	}
-}
-
-Result SaveAllPlayers() noexcept
-{
-	IDVector players = GetList(Type::ID_PLAYER);
-	int n = 0;
-	for (const auto& id : players)
-		if (SavePlayerData(id) == 1) n++;
-	timestamp(); printf("PLAYER_sys: Players data has been saved into %d files\n", n);
-	return (Result)1;
-}
-
-void ShowPlayersOnlineSR(ID player) // Shows all online players in server rules
-{
-	std::string msg;
-	IDVector players = GetList(Type::ID_PLAYER);
-	for (const ID& id : players)
-		if (id != player)
-		{
-		String name = GetBaseName(id);
-		msg += ", " + name;
-		}
-	msg.erase(0, 2);
-	if (msg.length() != 0) SetServerRule("players", msg);
-	else SetServerRule("players", "-");
-	return;
-}
-
-Result TimerSaveWorld()
+Result TimerSaveWorld() noexcept
 {
 	return worldSerializer->SaveWorldState();
+}
+
+Result TimerSavePlayers() noexcept
+{
+	return worldSerializer->SaveAllPlayersData();
+}
+
+Result TimerWeatherUpdate() noexcept
+{
+	weatherManager->ChangeWeather();
+	return Result(1);
+}
+
+State ProceedCommand(Player player, int argc, vector<String> argv) noexcept;
+string string_replace(string src, string const& target, string const& repl) noexcept;
+
+// Return death message for different reasons
+String GetDeathReason(Death d, ID killer) noexcept 
+{
+	switch (d)
+	{
+	case Death::None:
+		return "died";
+	case Death::Explosion:
+		return "blew up";
+	case Death::Gun:
+		return "was shot by " + GetBaseName(killer);
+	case Death::BluntWeapon:
+		return "was slain by " + GetBaseName(killer);
+	case Death::HandToHand:
+		return "was torn in half by " + GetBaseName(killer);
+	case Death::ObjectImpact:
+		return "skull was crushed";
+	case Death::Poison:
+		return "died from poison";
+	case Death::Radiation:
+		return "was turned into pile of flesh";
+	}
+	return "died from unknown reason";
+}
+
+// Shows all online players in server rules
+void ShowPlayersOnlineSR(ID excludedPlayer) 
+{
+	String ruleText;
+	IDVector players = Player::GetList();
+	for (const auto& id : players)
+	{
+		if (id != excludedPlayer)
+		{
+			String name = GetBaseName(id);
+			ruleText += ", " + name;
+		}
+	}
+	ruleText.erase(0, 2);
+	if (ruleText.length() != 0)
+		SetServerRule("players", ruleText);
+	else
+		SetServerRule("players", "-");
 }
 
 void Cleanup() noexcept
 {
 	delete worldSerializer;
+	delete weatherManager;
 }
 
-Void VAULTSCRIPT OnServerInit() noexcept
+Void OnServerInit() noexcept
 {
-	printf("\nEX script %s\n----------------------------------------------------------\n", EXver);
-	SetServerRule("script", "EX " EXver);
-	worldSerializer = new WorldSerializer(true);
+	MainLog.i("exScript loading...");
+	cout << endl << "exScript " EXver << endl;
+	cout << "----------------------------------------------------------" << endl;
+	SetServerRule("script", "exScript " EXver);
 
 	CSimpleIniA ini;
 	SI_Error rc = ini.LoadFile("Settings.ini");
-	if (rc < 0) printf("WARNING: Can't load file Settings.ini, loading default settings...\n");
+	if (rc < 0)
+		MainLog.w("Can't load file Settings.ini, loading default settings...");
 
-	std::string name = ini.GetValue("settings", "name", "Untitled");
-	char fname[name.length() + 16];
-	snprintf(fname, name.length() + 16, name.c_str(), EXver);
-	SetServerName(fname);
+	//Name
+	ServerName = string_replace(ini.GetValue("settings", "name", "Untitled"), "$exver", EXver);
+	//Password
+	ServerPassword = ini.GetValue("settings", "password", "");
+	//Map
+	ServerMapName = ini.GetValue("settings", "map", "Whole world");
+	//Site
+	ServerSite = ini.GetValue("settings", "website", "vaultmp.com");
+	//Message of the day
+	ServerMOTD = string_replace(ini.GetValue("settings", "motd", "Welcome to $sname, stranger!"), "$sname", ServerName);
+	//Timescale
+	ServerTimeScale = atof(ini.GetValue("settings", "timescale", "1.0"));
+	//Show players in server rules
+	ShowPlayersOnlineInRules = strcmp(ini.GetValue("settings", "showposr", "true"), "true") == 0;
+	//Console enabled
+	ServerConsoleEnabled = (std::strtoul(ini.GetValue("settings", "console", "1"), nullptr, 10) == 1 ? True : False);
 
-	motd = string_replace(ini.GetValue("settings", "motd", "Welcome to $sname, stranger!"), "$sname", fname);
+	//Place default items
+	bool useDefaultItemLists = strcmp(ini.GetValue("settings", "useitemlists", "false"), "true") == 0;
+	//Serialize world type
+	int serializationType = std::strtoul(ini.GetValue("settings", "serializeworld", "3"), nullptr, 10);
+	
+	//Weather type
+	WTHRDYNTYPE weatherType = static_cast<WTHRDYNTYPE>(std::strtoul(ini.GetValue("settings", "weather", "350"), nullptr, 10));
 
-	std::string map = ini.GetValue("settings", "map", "Whole world");
-	SetServerMap(map);
+	SetServerName(ServerName);
+	SetServerMap(ServerMapName);
+	SetServerRule("website", ServerSite);
+	SetTimeScale(ServerTimeScale);
+	SetConsoleEnabled(ServerConsoleEnabled);
+	if (ShowPlayersOnlineInRules)
+		SetServerRule("players", "-");
 
-	std::string site = ini.GetValue("settings", "website", "vaultmp.com");
-	SetServerRule("website", site);
+	worldSerializer = new WorldSerializer(useDefaultItemLists, serializationType);
+	weatherManager = new WeatherManager();
 
-	showPOSRule = strcmp(ini.GetValue("settings", "showposr", "true"), "true") == 0;
-	if (showPOSRule) SetServerRule("players", "-");	
+	cout << "Server settings" << endl << endl;
 
-	serializeWorld = std::strtoul(ini.GetValue("settings", "serializeworld", "3"), nullptr, 10);
+	cout << "Name:\t\t\t"			<< ServerName << endl;
+	cout << "Password:\t\t"			<< ServerPassword << endl;
+	cout << "Map:\t\t\t"			<< ServerMapName<< endl;
+	cout << "Website:\t\t"			<< ServerSite << endl;
+	cout << "Timescale:\t\t"		<< ServerTimeScale << endl;
 
-	serverPass = ini.GetValue("settings", "password", "");
+	cout << "Weather:\t\t"			<< (weatherManager->GetDynamicsType() == WTHRDYNTYPE::Random ? "Random" :
+										weatherManager->GetDynamicsType() == WTHRDYNTYPE::Listed ? "Dynamic" : "Static") << endl;
 
-	//WTHRDYNTYPE weather = static_cast<WTHRDYNTYPE>(std::strtoul(ini.GetValue("settings", "weather", "350"), nullptr, 10));
-	//WeatherManager::getInstance().ChangeDynamicType(weather);
+	cout << "World serialization:\t"<< (worldSerializer->GetSerializationType() == 0 ? "No" : 
+										worldSerializer->GetSerializationType() == 1 ? "Load only" : 
+										worldSerializer->GetSerializationType() == 2 ? "Save only" : 
+										worldSerializer->GetSerializationType() == 3 ? "Full" : "Unknown") << endl;
 
-	float timescale = atof(ini.GetValue("settings", "timescale", "1.0"));
-	SetTimeScale(timescale);
+	cout << "Show Online:\t\t"		<< (ShowPlayersOnlineInRules ? "Yes" : "No") << endl;
+	cout << "Console enabled:\t"	<< (ServerConsoleEnabled ? "Yes" : "No") << endl;
+	cout << "Default items:\t\t"	<< (worldSerializer->IsPlacingDefaultItems() ? "Yes" : "No") << endl;
 
-	CHCplayercname = ini.GetValue("Chat settings", "name", "99CC00");
-	CHCplayercmsg = ini.GetValue("Chat settings", "msg", "33B5E5");
-	CHCservermsg = ini.GetValue("Chat settings", "server", "FF4444");
+	cout << "MOTD: " << endl << ServerMOTD << endl;
 
-	CHCplayercname = "[colour='FF" + CHCplayercname + "']";
-	CHCplayercmsg = "[colour='FF" + CHCplayercmsg + "']";
-	CHCservermsg = "[colour='FF" + CHCservermsg + "']";
+	cout << "----------------------------------------------------------" << endl;
 
-	unsigned int consoleEnabled = std::strtoul(ini.GetValue("settings", "console", "1"), nullptr, 10);
-	SetConsoleEnabled(consoleEnabled == 1 ? True : False);
+	if (ServerPassword.length() > (int)Index::MAX_PASSWORD_SIZE)
+	{
+		(MainLog << LOG_ERROR << "Server password too long(max " << (int)Index::MAX_PASSWORD_SIZE << " characters)").end();
+		ServerPassword.clear();
+	}
+	if (ServerMOTD.length() > (int)Index::MAX_MESSAGE_LENGTH)
+	{
+		(MainLog << LOG_ERROR << "Server MOTD too long(max " << (int)Index::MAX_MESSAGE_LENGTH << " characters)").end();
+		ServerMOTD.erase((int)Index::MAX_MESSAGE_LENGTH);
+	}
 
-	printf("Server settings\n\nName:\t\t\t%s\nPassword:\t\t\t%s\nMOTD:\t\t\t%s\nMap:\t\t\t%s\nWebsite:\t\t%s\nTimescale:\t\t%.2f\nWeather:\t\t%s\nWorld serialization:\t%s\nSOPSR:\t\t\t%s\nConsole enabled:\t%s\nDefault items:\t\t%s"
-		"\n----------------------------------------------------------\n",
-		fname, serverPass.c_str(), motd.c_str(), map.c_str(), site.c_str(), timescale,
-		/*weather == WTHRDYNTYPE::Random ? "Random" : weather == WTHRDYNTYPE::Listed ? "Listed" : "Static",*/ "Disabled",
-		serializeWorld == 0 ? "No" : serializeWorld == 1 ? "Load only" : serializeWorld == 2 ? "Save only" : serializeWorld == 3 ? "Full" : "Unknown",
-		showPOSRule ? "Yes" : "No", consoleEnabled == 1 ? "Yes" : "No", worldSerializer->IsPlacingDefaultItems() ? "Yes" : "No");
-
-	if (serializeWorld & 1)
+	if (worldSerializer->GetSerializationType() & 1)
 		worldSerializer->LoadWorldState();
-	if (serializeWorld & 2)
-		CreateTimer(&TimerSaveWorld, (Interval)1200000);
-	CreateTimer(&SaveAllPlayers, (Interval)300000);
+
+	if (worldSerializer->GetSerializationType() & 2)
+		CreateTimer(&TimerSaveWorld, Interval(1200000));
+
+	CreateTimer(&TimerSavePlayers, Interval(300000));
+
+	weatherManager->ChangeDynamicType(weatherType);
+
+	MainLog.i("exScript loaded");
 }
 
-Void VAULTSCRIPT OnServerExit() noexcept
+Void OnServerExit() noexcept
 {
-	printf("EX script terminating\n");
-	SaveAllPlayers();
-	if (serializeWorld & 2) 
+	MainLog.i("exScript exiting...");
+
+	worldSerializer->SaveAllPlayersData();
+
+	if (worldSerializer->GetSerializationType() & 2)
 		worldSerializer->SaveWorldState();
+
 	Cleanup();
 }
 
-State VAULTSCRIPT OnClientAuthenticate(cRawString name, cRawString pwd) noexcept
+State OnClientAuthenticate(cRawString name, cRawString pwd) noexcept
 {
-	if (serverPass.length() != 0)
+	if (ServerPassword.length() != 0)
 	{
-		if (serverPass.compare(pwd) != 0)
+		if (ServerPassword.compare(pwd) != 0)
 		{
-			timestamp(); printf("Authentication rejected: %s\n", name);
+			(MainLog << LOG_INFO << "Authentication rejected: " << name).end();
 			return False;
 		}
 	}
 	return True;
 }
 
-Void VAULTSCRIPT OnPlayerDisconnect(ID player, Reason reason) noexcept
+Void OnPlayerDisconnect(ID playerID, Reason reason) noexcept
 {
-	SavePlayerData(player);
-	String name = GetBaseName(player);
-	timestamp(); printf("PLAYER: %s disconnected (reason:%d online:%d)\n", name.c_str(), reason, GetCurrentPlayers() - 1);
-	Chat << CHCplayercname + name + CHCplayercmsg + " left the game";
-	if (showPOSRule) ShowPlayersOnlineSR(player);
+	Player player(playerID);
+
+	//Save player data
+	worldSerializer->SavePlayerData(player);
+
+	String playerName = player.GetBaseName();
+	(MainLog << LOG_INFO << "Player " << playerName << " disconnected (reason:" << reason << " online:" << GetCurrentPlayers() - 1 << ")").end();
+	Chat << playerName + "$green left the game";
+
+	// Update server rules
+	if (ShowPlayersOnlineInRules) 
+		ShowPlayersOnlineSR(playerID);
 }
 
-NPC_ VAULTSCRIPT OnPlayerRequestGame(ID player) noexcept
+NPC_ OnPlayerRequestGame(ID playerID) noexcept
 {
-	Player pplayer(player);
-	String name = pplayer.GetBaseName();
-	timestamp(); printf("PLAYER: %s connected (online:%d)\n", name.c_str(), GetCurrentPlayers());
-	pplayer.AddItem(static_cast<Base>(0x0005B6CD), 10, 1);
-	char tmpc[64];
-	snprintf(tmpc, 64, "%s%s%s joined the game. Players online %d", CHCplayercname.c_str(), name.c_str(), CHCplayercmsg.c_str(), GetCurrentPlayers());
-	Chat << tmpc;
-	pplayer << string_replace(motd, "$name", name);
-	snprintf(tmpc, 64, "./files/Players/%s.dat", name.c_str());
-	if (FileExists(tmpc))
-	{
-		std::ifstream fin(tmpc);
-		char buf[128];
-		fin.getline(buf, 128);
-		fin.getline(buf, 128);
-		while (fin.good())
-		{
-			unsigned int base, count, equipped, silent;
-			Value condition;
-			sscanf(buf, "%u %u %lf %u %u", &base, &count, &condition, &equipped, &silent);
-			pplayer.AddItem(static_cast<Base>(base), (UCount)count, condition, static_cast<State>(silent));
-			if ((State)equipped)
-			{
-				pplayer.EquipItem(static_cast<Base>(base), True, False);
-			}
-			fin.getline(buf, 128);
-		}
-		fin.close();
-	}
-	if (showPOSRule) ShowPlayersOnlineSR((ID)(-1));
-	return static_cast<NPC_>(0);
+	Player player(playerID);
+
+	String playerName = player.GetBaseName();
+	(MainLog << LOG_INFO << "Player " << playerName << " connected (online:" << GetCurrentPlayers() << ")").end();
+	Chat << playerName + "$green joined the game. Players online " + to_string(GetCurrentPlayers());
+
+	//Show MOTD to player
+	player << string_replace(ServerMOTD, "$name", playerName);
+
+	//Load player data with items
+	worldSerializer->LoadPlayerData(player, true);
+
+	// Update server rules
+	if (ShowPlayersOnlineInRules)
+		ShowPlayersOnlineSR(ID(-1));
+
+	return NPC_(0);
 }
 
-State VAULTSCRIPT OnPlayerChat(ID player, RawString message) noexcept
+State OnPlayerChat(ID playerID, RawString message) noexcept
 {
-	String name = GetBaseName(player);
+	Player player(playerID);
 	if (*message == '/')
 	{
-		std::vector<String> tokens;
+		std::vector<String> argv;
 		RawString cmd = std::strtok(message + 1, " ");
 		while (cmd)
 		{
-			tokens.emplace_back(cmd);
+			argv.emplace_back(cmd);
 			cmd = std::strtok(nullptr, " ");
 		}
-		if (!tokens.empty())
+		if (!argv.empty())
 		{
-			Player pplayer(player);
-			if (!tokens[0].compare("players"))                              // Show players online
-			{
-				std::string msg;
-				IDVector players = GetList(Type::ID_PLAYER);
-				pplayer << CHCservermsg + "Players online:";
-				for (const ID& id : players)
-				{
-					String name = GetBaseName(id);
-					if ((msg.length() + 2 + name.length()) >= static_cast<size_t>(Index::MAX_CHAT_LENGTH))
-					{
-						msg.erase(0, 2);
-						pplayer << CHCplayercmsg + msg;
-						msg.clear();
-					}
-					char num[4];
-					std::snprintf(num, sizeof(num), "%d", GetConnection(id));
-					msg += ", " + name + '[' + String(num) + ']';
-				}
-				msg.erase(0, 2);
-				pplayer << CHCplayercmsg + msg;
-			}
-			else if (!tokens[0].compare("save"))                            // Save player data
-			{
-				SavePlayerData(player);
-				pplayer << CHCservermsg + "Your player data has been saved";
-			}
-			else if (!tokens[0].compare("safe"))
-			{
-				static Base safe = static_cast<Base>(0x000533CE);
-				Value X, Y, Z;
-				GetPos(player, X, Y, Z);
-				CreateContainer(static_cast<CONT>(safe), GetCell(player), X, Y, Z);
-			}
-			else if (!tokens[0].compare("ad"))
-			{
-				pplayer.UIMessage("Hello, " + pplayer.GetBaseName() + "!");
-
-				auto ID = ItemList::Create({
-						{ ALCH::NukaCola, 100 }, // 100x Nuka Cola
-						{ WEAP::Weap32CaliberPistol, 1, 80.0, True, True }, // .32 pistol, 80% health, equipped
-						{ AMMO::Ammo32Caliber, 300 }, // 300x .32 ammo
-				});
-
-				pplayer.AddItemList(ID);
-				DestroyObject(ID);
-			}
-			else if (!tokens[0].compare("anim") || !tokens[0].compare("a")) // Play animation
-			{
-				std::string errmsgl1(CHCservermsg + "Use /a(anim) <id(1-103)>");
-				std::string errmsgl2(CHCservermsg + "or /a(anim) <death/hi/give/take/smoke/heal/sleep/heart/fu>");
-				std::string errmsgl3(CHCservermsg + "or /a(anim) <main/chat/warm/wall/weapon/work/tour> <id>");
-				std::string errmsgl4(CHCservermsg + "or /a(anim) <cook/ground/sit/bar/wtf> <id>");
-				if (tokens.size() > 1)
-				{
-					unsigned int idx = std::strtoul(tokens[1].c_str(), nullptr, 10);
-					if (idx == 0)
-					{
-						unsigned int anim = 0;
-						if (!tokens[1].compare("death")) anim = mainAnims[0];
-						else if (!tokens[1].compare("hi")) anim = mainAnims[1];
-						else if (!tokens[1].compare("give")) anim = mainAnims[2];
-						else if (!tokens[1].compare("take")) anim = mainAnims[3];
-						else if (!tokens[1].compare("smoke")) anim = mainAnims[4];
-						else if (!tokens[1].compare("fu")) anim = mainAnims[5];
-						else if (!tokens[1].compare("heal")) anim = mainAnims[6];
-						else if (!tokens[1].compare("heart")) anim = mainAnims[7];
-						else if (!tokens[1].compare("sleep")) anim = mainAnims[8];
-						else
-						{
-							if (tokens.size() < 3) pplayer << errmsgl1 << errmsgl2 << errmsgl3 << errmsgl4;
-							else
-							{
-								unsigned int aidx = std::strtoul(tokens[2].c_str(), nullptr, 10);
-								if (!tokens[1].compare("chat"))         anim = mainAnims[9 + aidx % 20];
-								else if (!tokens[1].compare("combat"))  anim = mainAnims[29 + aidx % 4];
-								else if (!tokens[1].compare("warm"))    anim = mainAnims[33 + aidx % 3];
-								else if (!tokens[1].compare("wall"))    anim = mainAnims[36 + aidx % 6];
-								else if (!tokens[1].compare("weapon"))  anim = mainAnims[42 + aidx % 4];
-								else if (!tokens[1].compare("work"))    anim = mainAnims[46 + aidx % 8];
-								else if (!tokens[1].compare("tour"))    anim = mainAnims[54 + aidx % 4];
-								else if (!tokens[1].compare("cook"))    anim = mainAnims[58 + aidx % 3];
-								else if (!tokens[1].compare("ground"))  anim = mainAnims[61 + aidx % 10];
-								else if (!tokens[1].compare("sit"))     anim = mainAnims[71 + aidx % 5];
-								else if (!tokens[1].compare("bar"))     anim = mainAnims[76 + aidx % 7];
-								else if (!tokens[1].compare("main"))    anim = mainAnims[83 + aidx % 17];
-								else if (!tokens[1].compare("wtf"))     anim = mainAnims[100 + aidx % 3];
-								else pplayer << errmsgl1 << errmsgl2 << errmsgl3 << errmsgl4;
-							}
-						}
-						if (anim > 0) pplayer.PlayIdle(static_cast<IDLE>(anim)); //Play named animation
-					}
-					else if (idx <= mainAnims.size())                            //Play unnamed animation from mainAnims list
-						pplayer.PlayIdle(static_cast<IDLE>(mainAnims[idx - 1]));
-					else
-						pplayer.PlayIdle(static_cast<IDLE>(idx));               //Play unnamed animation
-				}
-				else pplayer << errmsgl1 << errmsgl2 << errmsgl3 << errmsgl4;
-			}
-			else if (!tokens[0].compare("pos"))                                 // Show player position
-			{
-				Value X, Y, Z;
-				GetPos(player, X, Y, Z);
-				char msg[128];
-				snprintf(msg, 128,
-					"%sPosition X: %.2f Y: %.2f Z: %.2f Cell: %d",
-					CHCservermsg.c_str(), X, Y, Z, GetCell(player));
-				pplayer << msg;
-				GetAngle(player, X, Y, Z);
-				snprintf(msg, 128,
-					"%sRotation X: %.2f Y: %.2f Z: %.2f",
-					CHCservermsg.c_str(), X, Y, Z);
-				pplayer << msg;
-			}
-			/*else if (!tokens[0].compare("weather"))                             // Change weather
-			{
-			char msg [16];
-			if (tokens.size() > 1)
-			{
-			int wid = std::strtoul(tokens[1].c_str(), nullptr, 16);
-			WeatherManager::getInstance().ChangeWeather(static_cast<WTHR>(wid));
-			snprintf(msg, 16, "%d", wid);
-			pplayer << msg;
-			}
-			snprintf(msg, 16, "%sWeather id: %d", CHCservermsg.c_str(), GetGameWeather());
-			pplayer << msg;
-			if (tokens.size() == 0) pplayer << CHCservermsg + "Use /weather <id>";
-			}*/
-			else if (!tokens[0].compare("time"))
-			{
-				if (tokens.size() > 1)
-				{
-					if (!tokens[1].compare("set"))                                  // Change time
-					{
-						if (tokens.size() > 2) SetGameHour(std::strtoul(tokens[2].c_str(), nullptr, 10));
-						else pplayer << CHCservermsg + "Use /time set <hour>";
-					}
-					else if (!tokens[1].compare("day"))     SetGameHour(12);
-					else if (!tokens[1].compare("night"))   SetGameHour(0);
-					else if (!tokens[1].compare("morning")) SetGameHour(6);
-					else if (!tokens[1].compare("evening")) SetGameHour(18);
-				}
-				else pplayer << CHCservermsg + "Use /time <set/day/night/morning/evening>";
-			}
-			else if (!tokens[0].compare("race"))                                    // Change player race
-			{
-				if (tokens.size() > 1)
-				{
-					RACE race = static_cast<RACE>(std::strtoul(tokens[1].c_str(), nullptr, 16));
-					SetActorBaseRace(player, race);
-				}
-				else pplayer << CHCservermsg + "Use /race <id>";
-			}
-			else if (!tokens[0].compare("kill"))                                    // Kill player
-			{
-				KillActor(player, player);
-				timestamp(); printf("PLAYER: %s died (suicide)\n", name.c_str());
-				Chat << CHCplayercname + name + CHCplayercmsg + " committed suicide";
-			}
-			else if (!tokens[0].compare("sex"))                                     // Change player sex
-				pplayer.SetActorBaseSex(static_cast<Sex>(1 - static_cast<int>(pplayer.GetActorBaseSex())));
-			else if (!tokens[0].compare("age"))
-				pplayer.AgeActorBaseRace(1);
-			else if (!tokens[0].compare("young"))
-				pplayer.AgeActorBaseRace(-1);
-			else if (!tokens[0].compare("?") || !tokens[0].compare("help") || !tokens[0].compare("commands"))// Show all commands
-				pplayer << CHCservermsg + "Commands:"
-				<< CHCservermsg + "?(help, commands), save, weather, time, pos, players"
-				<< CHCservermsg + "sex, race, age, young, kill, a(anim)";
-			else
-				pplayer << CHCservermsg + "Unknown command: " + tokens[0]
-				<< CHCservermsg + "Commands:"
-				<< CHCservermsg + "?(help, commands), save, weather, time, pos, players" << CHCservermsg + "sex, race, age, young, kill, a(anim)";
+			return ProceedCommand(player, argv.size(), argv);
 		}
-		return False;
+		else
+		{ 
+			return False;
+		}
 	}
 	else
 	{
-		String msg = CHCplayercname + name + ": " + CHCplayercmsg + message;           // Build chat message
+		String msg = player.GetBaseName() + ":$green " + message;           // Build chat message
 		std::strncpy(message, msg.c_str(), static_cast<size_t>(Index::MAX_CHAT_LENGTH));
+		(ChatLog << message).end();
 	}
 	return True;
 }
 
-Void VAULTSCRIPT OnSpawn(ID object) noexcept
+Void OnSpawn(ID object) noexcept
 {
 	if (IsPlayer(object))// Get player data from file
 	{
 		Player player(object);
-		String name = player.GetBaseName();
-		char filename[64];
-		snprintf(filename, 64, "./files/Players/%s.dat", name.c_str());
-		if (FileExists(filename))
-		{
-			std::ifstream fin(filename);
-			char buf[128];
-			fin.getline(buf, 128);
-			int cell, race, sex;
-			Value X, Y, Z, rX, rY, rZ;
-			sscanf(buf, "%d %lf %lf %lf %d %d %lf %lf %lf", &cell, &X, &Y, &Z, &race, &sex, &rX, &rY, &rZ);
-			player.SetCell(static_cast<CELL>(cell), X, Y, Z);
-			player.SetAngle(rX, rY, rZ);
-			SetActorBaseRace(object, static_cast<RACE>(race));
-			SetActorBaseSex(object, static_cast<Sex>(sex));
-			fin.close();
-		}
-		else
-		{
-			SetActorBaseRace(object, static_cast<RACE>(25));
-			SetActorBaseSex(object, Sex::Male);
-		}
+		worldSerializer->LoadPlayerData(player, false);
 	}
 }
 
-Void VAULTSCRIPT OnActorDeath(ID actor, ID killer, Limb limbs, Death cause) noexcept
+Void OnActorDeath(ID actor, ID killer, Limb limbs, Death cause) noexcept
 {
 	if (IsPlayer(actor))
 	{
 		String name = GetBaseName(actor);
-		timestamp(); printf("PLAYER: %s died (%d)\n", name.c_str(), cause);
-		Chat << CHCplayercname + name + CHCplayercmsg + " " + GetDeathReason(cause, killer);
+		(MainLog << "PLAYER: " << name << " died (" << (int)cause << ")").end();
+		Chat << name + "$green " + GetDeathReason(cause, killer);
 	}
 }
 
-/*
-
-Void VAULTSCRIPT OnGameYearChange(UCount year) noexcept
+State ProceedCommand(Player player, int argc, vector<String> argv) noexcept
 {
+	String playerName = player.GetBaseName();
 
+	// Dibabled untill respawn fix
+	/*// Suicide
+	else if (!argv[0].compare("kill"))
+	player.KillActor();*/
+
+	// Show online players
+	if (!argv[0].compare("players"))
+	{
+		IDVector players = Player::GetList();
+		player << "$yellowPlayers online:";
+		for (const auto& id : players)
+		{
+			player << GetBaseName(id);
+		}
+	}
+
+	// Save player data
+	else if (!argv[0].compare("save"))
+	{
+		worldSerializer->SavePlayerData(player);
+		player << "$yellowYour player data has been saved";
+	}
+
+	// Play animation
+	else if (!argv[0].compare("anim") || !argv[0].compare("a"))
+	{
+		string errmsgl1("$redUse /a(anim) <id(1-103)>");
+		string errmsgl2("$redor /a(anim) <death/hi/give/take/smoke/heal/sleep/heart/fu>");
+		string errmsgl3("$redor /a(anim) <main/chat/warm/wall/weapon/work/tour> <id>");
+		string errmsgl4("$redor /a(anim) <cook/ground/sit/bar/wtf> <id>");
+		if (argc > 1)
+		{
+			unsigned int idx = strtoul(argv[1].c_str(), nullptr, 10);
+			if (idx == 0)
+			{
+				IDLE anim = IDLE(0);
+				if (!argv[1].compare("death")) anim = SelectedAnimations[0];
+				else if (!argv[1].compare("hi")) anim = SelectedAnimations[1];
+				else if (!argv[1].compare("give")) anim = SelectedAnimations[2];
+				else if (!argv[1].compare("take")) anim = SelectedAnimations[3];
+				else if (!argv[1].compare("smoke")) anim = SelectedAnimations[4];
+				else if (!argv[1].compare("fu")) anim = SelectedAnimations[5];
+				else if (!argv[1].compare("heal")) anim = SelectedAnimations[6];
+				else if (!argv[1].compare("heart")) anim = SelectedAnimations[7];
+				else if (!argv[1].compare("sleep")) anim = SelectedAnimations[8];
+				else
+				{
+					if (argc < 3)
+					{
+						player << errmsgl1 << errmsgl2 << errmsgl3 << errmsgl4;
+					}
+					else
+					{
+						unsigned int aidx = std::strtoul(argv[2].c_str(), nullptr, 10);
+						if (!argv[1].compare("chat"))         anim = SelectedAnimations[9 + aidx % 20];
+						else if (!argv[1].compare("combat"))  anim = SelectedAnimations[29 + aidx % 4];
+						else if (!argv[1].compare("warm"))    anim = SelectedAnimations[33 + aidx % 3];
+						else if (!argv[1].compare("wall"))    anim = SelectedAnimations[36 + aidx % 6];
+						else if (!argv[1].compare("weapon"))  anim = SelectedAnimations[42 + aidx % 4];
+						else if (!argv[1].compare("work"))    anim = SelectedAnimations[46 + aidx % 8];
+						else if (!argv[1].compare("tour"))    anim = SelectedAnimations[54 + aidx % 4];
+						else if (!argv[1].compare("cook"))    anim = SelectedAnimations[58 + aidx % 3];
+						else if (!argv[1].compare("ground"))  anim = SelectedAnimations[61 + aidx % 10];
+						else if (!argv[1].compare("sit"))     anim = SelectedAnimations[71 + aidx % 5];
+						else if (!argv[1].compare("bar"))     anim = SelectedAnimations[76 + aidx % 7];
+						else if (!argv[1].compare("main"))    anim = SelectedAnimations[83 + aidx % 17];
+						else if (!argv[1].compare("wtf"))     anim = SelectedAnimations[100 + aidx % 3];
+						else player << errmsgl1 << errmsgl2 << errmsgl3 << errmsgl4;
+					}
+				}
+				if (anim != IDLE(0)) player.PlayIdle(anim); //Play named animation
+			}
+			else if (idx <= SelectedAnimations.size())                            //Play unnamed animation from SelectedAnimations list
+				player.PlayIdle(static_cast<IDLE>(SelectedAnimations[idx - 1]));
+			else
+				player.PlayIdle(static_cast<IDLE>(idx));               //Play unnamed animation
+		}
+		else player << errmsgl1 << errmsgl2 << errmsgl3 << errmsgl4;
+	}
+
+	// Show player position and rotation
+	else if (!argv[0].compare("pos"))
+	{
+		char msg[(int)Index::MAX_MESSAGE_LENGTH];
+		Value X, Y, Z;
+		player.GetPos(X, Y, Z);
+		snprintf(msg, (int)Index::MAX_MESSAGE_LENGTH, "Position X: %.2f Y: %.2f Z: %.2f Cell: %d", X, Y, Z, player.GetCell());
+		player << msg;
+
+		player.GetAngle(X, Y, Z);
+		snprintf(msg, (int)Index::MAX_MESSAGE_LENGTH, "Rotation X: %.2f Y: %.2f Z: %.2f", X, Y, Z);
+		player << msg;
+	}
+
+	// Change weather
+	else if (!argv[0].compare("weather"))
+	{
+		if (argv.size() > 1)
+		{
+			int wid = std::strtoul(argv[1].c_str(), nullptr, 16);
+			weatherManager->ChangeWeather(WTHR(wid));
+		}
+
+		char msg[(int)Index::MAX_MESSAGE_LENGTH];
+		snprintf(msg, (int)Index::MAX_MESSAGE_LENGTH, "$yellowCurrent weather is %d", GetGameWeather());
+		player << msg;
+
+		if (argv.size() == 0)
+			player << "$redUse /weather <id>";
+	}
+
+	// Get/Set Time
+	else if (!argv[0].compare("time"))
+	{
+		if (argc > 1)
+		{
+			if (!argv[1].compare("set"))
+			{
+				if (argc > 2)
+				{
+					int hour = std::strtoul(argv[2].c_str(), nullptr, 10) + 2;
+					if (hour > 23)
+						hour = hour % 24;
+					SetGameHour(hour);
+					player << "$yellowTime set to " + to_string(GetGameHour());
+				}
+				else
+					player << "$redUse /time set <hour(0-23)>";
+			}
+			else if (!argv[1].compare("day"))
+			{
+				SetGameHour(12);
+				player << "$yellowTime set to " + to_string(GetGameHour());
+			}
+			else if (!argv[1].compare("night"))
+			{
+				SetGameHour(0);
+				player << "$yellowTime set to " + to_string(GetGameHour());
+			}
+			else if (!argv[1].compare("morning"))
+			{
+				SetGameHour(6);
+				player << "$yellowTime set to " + to_string(GetGameHour());
+			}
+			else if (!argv[1].compare("evening"))
+			{
+				SetGameHour(18);
+				player << "$yellowTime set to " + to_string(GetGameHour());
+			}
+			else if (!argv[1].compare("get"))
+				player << "$yellowIt's " + to_string(GetGameHour());
+			else
+				player << "$redUse /time <get/set/day/night/morning/evening>";
+		}
+		else
+			player << "$redUse /time <get/set/day/night/morning/evening>";
+	}
+
+	// Change player Race
+	else if (!argv[0].compare("race"))
+	{
+		if (argc > 1)
+		{
+			RACE race = static_cast<RACE>(std::strtoul(argv[1].c_str(), nullptr, 16));
+			player.SetActorBaseRace(race);
+		}
+		else
+			player << "$redUse /race <id>" << "$yellowCurrent race is " + to_string((int)player.GetActorBaseRace());
+	}
+
+	// Change player Sex
+	else if (!argv[0].compare("sex"))
+		player.SetActorBaseSex(static_cast<Sex>(1 - static_cast<int>(player.GetActorBaseSex())));
+
+	// Change player Age/Young
+	else if (!argv[0].compare("age"))
+		player.AgeActorBaseRace(1);
+	else if (!argv[0].compare("young"))
+		player.AgeActorBaseRace(-1);
+
+	// Show all commands
+	else
+		player << "$redUnknown command: " + argv[0]
+		<< "$redCommands:"
+		<< "$redsave, weather, time, pos, players"
+		<< "$redsex, race, age, young, kill, a(anim)";
+
+	return False;
 }
 
-Void VAULTSCRIPT OnGameMonthChange(UCount month) noexcept
+// Return a string with all occurrences of substring target replaced by repl.
+string string_replace(string src, string const& target, string const& repl) noexcept
 {
-
+	// handle error situations/trivial cases
+	if (target.length() == 0)
+	{
+		// searching for a match to the empty string will result in
+		//  an infinite loop
+		//  it might make sense to throw an exception for this case
+		return src;
+	}
+	if (src.length() == 0)
+	{
+		return src;  // nothing to match against
+	}
+	size_t idx = 0;
+	for (;;)
+	{
+		idx = src.find(target, idx);
+		if (idx == string::npos)  break;
+		src.replace(idx, target.length(), repl);
+		idx += repl.length();
+	}
+	return src;
 }
-
-Void VAULTSCRIPT OnGameDayChange(UCount day) noexcept
-{
-
-}
-
-Void VAULTSCRIPT OnGameHourChange(UCount hour) noexcept
-{
-
-}
-
-Void VAULTSCRIPT OnCellChange(ID object, VAULTCELL cell) noexcept
-{
-
-}
-
-Void VAULTSCRIPT OnContainerItemChange(ID container, Base item, Count count, Value value) noexcept
-{
-
-}
-
-Void VAULTSCRIPT OnActorValueChange(ID actor, Index index, Value value) noexcept
-{
-
-}
-
-Void VAULTSCRIPT OnActorBaseValueChange(ID actor, Index index, Value value) noexcept
-{
-
-}
-
-Void VAULTSCRIPT OnActorAlert(ID actor, State alerted) noexcept
-{
-
-}
-
-Void VAULTSCRIPT OnActorSneak(ID actor, State sneaking) noexcept
-{
-
-}
-
-Void VAULTSCRIPT OnActorDeath(ID actor, Limb limbs, Death cause) noexcept
-{
-
-}
-
-Void VAULTSCRIPT OnActorEquipItem(ID actor, Base item, Value value) noexcept
-{
-
-}
-
-Void VAULTSCRIPT OnActorUnequipItem(ID actor, Base item, Value value) noexcept
-{
-
-}
-
-Void VAULTSCRIPT OnActorDropItem(ID actor, Base item, UCount count, Value value) noexcept
-{
-
-}
-
-Void VAULTSCRIPT OnActorPickupItem(ID actor, Base item, UCount count, Value value) noexcept
-{
-
-}
-
-Void VAULTSCRIPT OnActorPunch(ID actor, State power) noexcept
-{
-
-}
-
-Void VAULTSCRIPT OnActorFireWeapon(ID actor, VAULTWEAPON weapon) noexcept
-{
-
-}
-
-*/

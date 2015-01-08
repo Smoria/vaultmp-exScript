@@ -59,11 +59,11 @@
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="exRecords.h" />
-    <ClInclude Include="func.h" />
     <ClInclude Include="logging.h" />
     <ClInclude Include="records.h" />
     <ClInclude Include="SimpleIni.h" />
     <ClInclude Include="vaultscript.h" />
+    <ClInclude Include="WeatherManager.h" />
     <ClInclude Include="WorldSerializer.h" />
   </ItemGroup>
   <ItemGroup>
