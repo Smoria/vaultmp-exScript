@@ -3,7 +3,7 @@
 
 #include <cstdlib>
 #include <cstdio>
-#include "vaultscript.h"
+#include "default/vaultscript.h"
 
 using namespace vaultmp;
 

@@ -1,7 +1,7 @@
 #ifndef EXRECORDS_H
 #define EXRECORDS_H
 
-#include "vaultscript.h"
+#include "default/vaultscript.h"
 using namespace vaultmp;
 
 static std::vector<WTHR> RandomWeatherList

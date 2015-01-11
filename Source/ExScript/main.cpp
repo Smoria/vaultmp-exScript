@@ -1,4 +1,4 @@
-#include "vaultscript.h"
+#include "default/vaultscript.h"
 
 #if defined(WIN32) && !defined(__WIN32__)
 #define __WIN32__
@@ -28,6 +28,9 @@ using namespace std;
 #include "logging.h"
 #include "WorldSerializer.h"
 #include "WeatherManager.h"
+#include "default/pickup.hpp"
+#include "default/ilview.hpp"
+#include "default/cview.hpp"
 
 string ServerPassword;
 string ServerName;
@@ -37,6 +40,9 @@ string ServerMOTD;
 float ServerTimeScale;
 State ServerConsoleEnabled;
 bool ShowPlayersOnlineInRules;
+
+IDHash<ID> cview_map;
+IDHash<ID> open_cviews;
 
 WorldSerializer* worldSerializer;
 WeatherManager* weatherManager;
@@ -54,7 +60,31 @@ Result TimerSavePlayers() noexcept
 Result TimerWeatherUpdate() noexcept
 {
 	weatherManager->ChangeWeather();
-	return Result(1);
+	return Result(True);
+}
+
+Result TimerRemoveActor(ID actor) noexcept
+{
+	DestroyObject(actor);
+	KillTimer();
+	return Result(True);
+}
+
+Result TimerCloseCView(ID player, ID cview) noexcept
+{
+	constexpr Value distance = 150.0;
+
+	Container container(cview_map[cview]);
+	Value X, Y, Z;
+	container.GetPos(X, Y, Z);
+
+	if (!container || !IsNearPoint(player, X, Y, Z, distance))
+	{
+		DestroyWindow(cview);
+		KillTimer();
+	}
+
+	return Result(True);
 }
 
 State ProceedCommand(Player player, int argc, vector<String> argv) noexcept;
@@ -109,6 +139,33 @@ void Cleanup() noexcept
 {
 	delete worldSerializer;
 	delete weatherManager;
+}
+
+Result OnItemPickup(ID item, ID actor) noexcept;
+Result OnItemMove(ID cview, ID item, ID destination, ID player) noexcept;
+
+Result FormatItemCView(ID item, char* format) noexcept
+{
+	Item data(item);
+	Actor actor(data.GetItemContainer());
+	auto type = data.BaseToType();
+
+	if (!type.compare("WEAP") || !type.compare("ARMO") || !type.compare("ARMA"))
+		snprintf(format, IlView::MAX_LENGTH_ITEM, "%dx %s (%d%%)%s", data.GetItemCount(), data.BaseToString().c_str(), static_cast<unsigned int>(data.GetItemCondition()), actor && data.GetItemEquipped() ? " (equipped)" : "");
+	else
+		snprintf(format, IlView::MAX_LENGTH_ITEM, "%dx %s", data.GetItemCount(), data.BaseToString().c_str());
+
+	return Result(True);
+}
+
+State IsCViewOpen(ID player, ID itemlist) noexcept
+{
+	for (const auto& cview : open_cviews)
+	if (cview.second == player)
+		if (cview_map[cview.first] == itemlist)
+			return True;
+
+	return False;
 }
 
 Void OnServerInit() noexcept
@@ -203,6 +260,8 @@ Void OnServerInit() noexcept
 	CreateTimer(&TimerSavePlayers, Interval(300000));
 
 	weatherManager->ChangeDynamicType(weatherType);
+
+	Pickup::Register(OnItemPickup);
 
 	MainLog.i("exScript loaded");
 }
@@ -310,11 +369,16 @@ Void OnSpawn(ID object) noexcept
 
 Void OnActorDeath(ID actor, ID killer, Limb limbs, Death cause) noexcept
 {
-	if (IsPlayer(actor))
+	if (IsActor(actor))
 	{
-		String name = GetBaseName(actor);
-		(MainLog << "PLAYER: " << name << " died (" << (int)cause << ")").end();
-		Chat << name + "$green " + GetDeathReason(cause, killer);
+		constexpr Interval delete_after_ms = static_cast<Interval>(8000);
+		CreateTimerEx(TimerRemoveActor, delete_after_ms, actor);
+		if (IsPlayer(actor))
+		{
+			String name = GetBaseName(actor);
+			(MainLog << "PLAYER: " << name << " died (" << (int)cause << ")").end();
+			Chat << name + "$green " + GetDeathReason(cause, killer);
+		}
 	}
 }
 
@@ -322,13 +386,12 @@ State ProceedCommand(Player player, int argc, vector<String> argv) noexcept
 {
 	String playerName = player.GetBaseName();
 
-	// Dibabled untill respawn fix
-	/*// Suicide
-	else if (!argv[0].compare("kill"))
-	player.KillActor();*/
-
+	// Suicide
+	if (!argv[0].compare("kill"))
+		player.KillActor();
+	
 	// Show online players
-	if (!argv[0].compare("players"))
+	else if (!argv[0].compare("players"))
 	{
 		IDVector players = Player::GetList();
 		player << "$yellowPlayers online:";
@@ -510,6 +573,39 @@ State ProceedCommand(Player player, int argc, vector<String> argv) noexcept
 		<< "$redsex, race, age, young, kill, a(anim)";
 
 	return False;
+}
+
+Void OnDestroy(ID reference) noexcept
+{
+	open_cviews.erase(reference);
+	cview_map.erase(reference);
+}
+
+Void OnActivate(ID object, ID actor) noexcept
+{
+	Container container(object);
+	Player player(actor);
+
+	if (container && player && container.GetLock() == Lock::Unlocked && !IsCViewOpen(actor, object))
+	{
+		auto cview = CView::Create(actor, object, OnItemMove, FormatItemCView);
+		open_cviews.emplace(cview, actor);
+		cview_map.emplace(cview, object);
+		player.AttachWindow(cview);
+
+		constexpr Interval interval = static_cast<Interval>(500);
+		CreateTimerEx(TimerCloseCView, interval, actor, cview);
+	}
+}
+
+Result OnItemPickup(ID item, ID actor) noexcept
+{
+	return static_cast<Result>(True);
+}
+
+Result OnItemMove(ID cview, ID item, ID destination, ID player) noexcept
+{
+	return static_cast<Result>(True);
 }
 
 // Return a string with all occurrences of substring target replaced by repl.

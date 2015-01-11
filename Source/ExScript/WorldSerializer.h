@@ -1,7 +1,7 @@
 #ifndef WORLDSERIALIZER_H
 #define WORLDSERIALIZER_H
 
-#include "vaultscript.h"
+#include "default/vaultscript.h"
 using namespace vaultmp;
 
 #include <fstream>
@@ -13,6 +13,7 @@ private:
 
 	struct ItemSaveStruct
 	{
+		char fileVersion = 1;
 		Base base = Base(0);
 		CELL cell = CELL(0);
 		NPC_ owner = NPC_(0);
@@ -27,6 +28,7 @@ private:
 	};
 	struct ContainerItemSaveStruct
 	{
+		char fileVersion = 1;
 		Base base = Base(0);
 		NPC_ owner = NPC_(0);
 		UCount count = 0;
@@ -40,6 +42,7 @@ private:
 	};
 	struct ContainerSaveStruct
 	{
+		char fileVersion = 1;
 		Base base = Base(0);
 		CELL cell = CELL(0);
 		NPC_ owner = NPC_(0);
@@ -54,6 +57,7 @@ private:
 	};
 	struct PlayerSaveStruct
 	{
+		char fileVersion = 1;
 		CELL cell = CELL(0);
 		RACE race = RACE::Caucasian;
 		Sex sex = Sex::Male;

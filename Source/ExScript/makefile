@@ -7,13 +7,13 @@ OUT_LIB=$(BIN_PATH)ex.dll
 OFLAGS=-shared -static -m32 -o $(OUT_LIB)
 
 all: main.o
-    $(CC) $(OBJ_PATH)main.o $(OFLAGS)
+	$(CC) $(OBJ_PATH)main.o $(OFLAGS)
 
 .cpp.o:
-    $(CC) $(CFLAGS) -c -o $(OBJ_PATH)$@ $<
-
+	$(CC) $(CFLAGS) -c -o $(OBJ_PATH)$@ $<
 
 clean:
-#    rm -rf OBJ_PATH BIN_PATH
-    rmdir /S /Q "$(OBJ_PATH)"
+	rmdir /S /Q "$(OBJ_PATH)"
+	rmdir /S /Q "$(BIN_PATH)"
 	mkdir "$(OBJ_PATH)"
+	mkdir "$(BIN_PATH)"
