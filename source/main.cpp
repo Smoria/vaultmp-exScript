@@ -1,9 +1,5 @@
 #include "default/vaultscript.h"
 
-#if defined(WIN32) && !defined(__WIN32__)
-#define __WIN32__
-#endif
-
 #ifdef __WIN32__
 #define EXs "W"
 #include "io.h"

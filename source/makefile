@@ -1,9 +1,21 @@
 CC=g++
 CFLAGS=-c -Wall -std=gnu++0x -m32
 
-OBJ_PATH=../obj/Win32/
-BIN_PATH=../bin/Win32/
-OUT_LIB=$(BIN_PATH)ex.dll
+ifeq ($(OS),Windows_NT)
+TARGET_OS=Win32
+TARGET_FORMAT=dll
+MKDIR=-mkdir
+RMDIR=rmdir /S /Q
+else
+TARGET_OS=Unix
+TARGET_FORMAT=so
+MKDIR=mkdir -p
+RMDIR=rm -rf
+endif
+
+OBJ_PATH=../obj/$(TARGET_OS)/
+BIN_PATH=../bin/$(TARGET_OS)/
+OUT_LIB=$(BIN_PATH)ex.$(TARGET_FORMAT)
 OFLAGS=-shared -static -m32 -o $(OUT_LIB)
 
 all: directories main.o
@@ -13,9 +25,9 @@ all: directories main.o
 	$(CC) $(CFLAGS) -c -o $(OBJ_PATH)$@ $<
 
 directories:
-	mkdir "$(OBJ_PATH)"
-	mkdir "$(BIN_PATH)"
+	$(MKDIR) "$(OBJ_PATH)"
+	$(MKDIR) "$(BIN_PATH)"
 
 clean:
-	rmdir /S /Q "$(OBJ_PATH)"
-	rmdir /S /Q "$(BIN_PATH)"
+	$(RMDIR) "$(OBJ_PATH)"
+	$(RMDIR) "$(BIN_PATH)"
