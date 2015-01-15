@@ -8,7 +8,7 @@
 using namespace vaultmp;
 
 #include "exRecords.h"
-#include "logging.h"
+#include "SimpleLogger.h"
 
 Result TimerWeatherUpdate() noexcept;
 

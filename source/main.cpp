@@ -25,7 +25,7 @@ using namespace vaultmp;
 using namespace std;
 
 #include "exRecords.h"
-#include "logging.h"
+#include "SimpleLogger.h"
 #include "WorldSerializer.h"
 #include "WeatherManager.h"
 #include "default/pickup.hpp"

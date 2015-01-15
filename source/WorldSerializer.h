@@ -5,7 +5,7 @@
 using namespace vaultmp;
 
 #include <fstream>
-#include "logging.h"
+#include "SimpleLogger.h"
 
 class WorldSerializer
 {
